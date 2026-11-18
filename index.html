@@ -1450,6 +1450,7 @@ function startRoleDataListeners(){
   const office = (role==='manager' || role==='office');
 
   if(!unsubItems){
+    teamNewSeenIds = null;
     purchaseSeenIds = null; // fresh listener: its first snapshot re-baselines the purchase-arrival tracker
     // field: only task/reminder items assigned to me (equality + `in` on two fields — no composite index needed)
     const itemsRef = office
@@ -1463,6 +1464,7 @@ function startRoleDataListeners(){
         runRollover();
         render();
         notePurchaseSnapshot(dailyAlertPending);
+        try{ noteTeamNewItems(); }catch(e){ console.error('team new-item alert failed', e); }
         if(dailyAlertPending){ dailyAlertPending=false; setTimeout(showLoginPopups, 400); }
         try{ vasBillSync(); }catch(e){ console.error('vas-app billing sync failed', e); }
       }
@@ -3249,7 +3251,7 @@ function updateNotifToggleUi(){
   const btn = document.getElementById('notifToggleBtn');
   const hint = document.getElementById('notifHint');
   if(!btn) return;
-  const base = 'ההתראות מגיעות רק כשהמערכת פתוחה בלשונית בדפדפן. כשהיא סגורה — נדנוד בוואטסאפ מגיע לטלפון.';
+  const base = 'ההתראות (נדנודים, ולמנהל — משימות ותזכורות חדשות מהצוות) מגיעות כשהמערכת פתוחה בלשונית או כאפליקציה, גם ממוזערת. כשהיא סגורה לגמרי — נדנוד בוואטסאפ מגיע לטלפון.';
   const perm = notifPermission();
   if(perm==='unsupported'){ btn.disabled = true; btn.textContent = 'התראות דפדפן לא נתמכות כאן'; if(hint) hint.textContent = 'הדפדפן הזה לא תומך בהתראות. כשהמערכת סגורה — נדנוד בוואטסאפ מגיע לטלפון.'; return; }
   btn.disabled = false;
@@ -3296,6 +3298,45 @@ function notifyNudgesInBrowser(list){
   });
 }
 document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) resetTitleBadge(); });
+
+/* MANAGER ALERT: a task / reminder opened by someone else (הילה, בן, ליאל…) pops up as a desktop
+   bubble (when browser notifications are on) + an in-app toast. Baselines on the first snapshot so
+   nothing old is announced at login; only items created in the last 10 minutes count (guards
+   against a listener re-attach replaying old rows). Read-only — never writes. */
+const TEAM_NEW_TYPES = ['task','reminder'];
+let teamNewSeenIds = null;
+function itemCreator(it){
+  if(it.createdBy) return it.createdBy;
+  const log = it.log || [];
+  const e = log.slice().reverse().find(l=> l && typeof l.text==='string' && l.text.indexOf('נוצר ע״י')===0);
+  return e ? (e.actor || e.text.replace('נוצר ע״י','').trim()) : '';
+}
+function itemCreatedMs(it){
+  if(typeof it.createdAt==='number') return it.createdAt;
+  return it.createdDate===todayStr() ? Date.now() : 0; // older rows: no exact time — today counts as recent
+}
+function noteTeamNewItems(){
+  if(state.currentUserRole!=='manager') return;
+  const rows = (state.items||[]).filter(it=> TEAM_NEW_TYPES.includes(it.type));
+  if(!teamNewSeenIds){ teamNewSeenIds = new Set(rows.map(i=>i.id)); return; }
+  const me = state.currentUser || '';
+  const fresh = rows.filter(it=> !teamNewSeenIds.has(it.id));
+  fresh.forEach(it=> teamNewSeenIds.add(it.id));
+  const recent = fresh.filter(it=>{ const by = itemCreator(it); return by && by!==me && by!=='מערכת' && (Date.now()-itemCreatedMs(it)) < 10*60*1000; });
+  if(!recent.length) return;
+  const first = recent[0];
+  const label = it=> TYPE_LABEL[it.type] || 'משימה';
+  showToast(recent.length===1 ? `🆕 ${itemCreator(first)} פתח/ה ${label(first)}: ${first.title}` : `🆕 ${recent.length} משימות/תזכורות חדשות מהצוות`);
+  if(document.hidden) bumpTitleBadge(recent.length);
+  if(!browserNotifActive()) return;
+  recent.slice(0,3).forEach(it=>{
+    try{
+      const who = it.assignee ? ` · אחראי/ת: ${it.assignee}` : '';
+      const n = new window.Notification(`🆕 ${label(it)} חדשה — ${itemCreator(it)}`, { body: `${it.title}${who}`, tag: 'hub-new-'+it.id, lang:'he', dir:'rtl' });
+      n.onclick = ()=>{ try{ window.focus(); }catch(e){} try{ n.close(); }catch(e){} };
+    }catch(e){ console.error('notification failed', e); }
+  });
+}
 
 /* ============================= CLARITY: PRIORITY / CRITICAL (קריטי) =============================
    priority: 'normal' | 'urgent' (דחוף, orange) | 'critical' (🔴 קריטי, red — manager only).
@@ -6245,6 +6286,8 @@ async function submitNew(type){
     fileData, fileName, fileType, fileChunked:false, fileChunkCount:0,
     terms: fields.terms, paymentMethod: fields.paymentMethod,
     log: [],
+    createdBy: state.currentUser || '',
+    createdAt: Date.now(),
   };
   if(type==='purchase'){
     item.site = fields.site;
