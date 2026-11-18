@@ -1450,7 +1450,7 @@ function startRoleDataListeners(){
   const office = (role==='manager' || role==='office');
 
   if(!unsubItems){
-    teamNewSeenIds = null;
+    teamNewSeenIds = null; teamDoneSeen = null;
     purchaseSeenIds = null; // fresh listener: its first snapshot re-baselines the purchase-arrival tracker
     // field: only task/reminder items assigned to me (equality + `in` on two fields — no composite index needed)
     const itemsRef = office
@@ -2045,8 +2045,13 @@ function vasBillItemFrom(kind, x, data, backlog){
   const desc = [];
   if(kind==='task' && x.location) desc.push(`מיקום: ${x.location}`);
   if(kind==='call' && String(x.desc||'').includes('\n')) desc.push(String(x.desc));
+  if(kind==='call' && x.technician) desc.push(`טכנאי: ${x.technician}`);
   if(x.report) desc.push(`דיווח ביצוע: ${x.report}`);
+  if(x.doneDesc && String(x.doneDesc).trim()!==String(x.report||'').trim()) desc.push(`פירוט ביצוע: ${x.doneDesc}`);
   if(x.qty) desc.push(`כמות: ${x.qty}`);
+  if(x.doneQty && String(x.doneQty)!==String(x.qty||'')) desc.push(`כמות שבוצעה: ${x.doneQty}`);
+  if(Array.isArray(x.media) && x.media.length) desc.push(`📷 ${x.media.length} תמונות/קבצים באפליקציית השטח`);
+  if(x.upsell) desc.push(`💡 הזדמנות מכירה${x.upsellType?' ('+x.upsellType+')':''}: ${typeof x.upsell==='string'?x.upsell:'כן'}`);
   desc.push(`בוצע ע״י ${by||'—'} ב-${at ? printFmtDate(at) : '—'}${x.closedTime?' '+x.closedTime:''}`);
   if(x.signId) desc.push('✍️ נחתם');
   let due = today;
@@ -3315,9 +3320,38 @@ function itemCreatedMs(it){
   if(typeof it.createdAt==='number') return it.createdAt;
   return it.createdDate===todayStr() ? Date.now() : 0; // older rows: no exact time — today counts as recent
 }
+/* MANAGER ALERT: someone else marked a task / reminder / purchase request as done → desktop bubble.
+   Tracks each item's last-seen status; only an open→done transition (by someone else) announces. */
+const TEAM_DONE_TYPES = ['task','reminder','purchase'];
+let teamDoneSeen = null; // id -> was done
+function noteTeamDoneItems(){
+  const rows = (state.items||[]).filter(it=> TEAM_DONE_TYPES.includes(it.type));
+  if(!teamDoneSeen){ teamDoneSeen = new Map(rows.map(i=>[i.id, i.status==='done'])); return; }
+  const me = state.currentUser || '';
+  const closed = [];
+  rows.forEach(it=>{
+    const isDone = it.status==='done';
+    const was = teamDoneSeen.get(it.id);
+    teamDoneSeen.set(it.id, isDone);
+    if(isDone && was===false && it.completedBy && it.completedBy!==me && it.doneDate===todayStr()) closed.push(it);
+  });
+  if(!closed.length) return;
+  const label = it=> TYPE_LABEL[it.type] || 'משימה';
+  const f = closed[0];
+  showToast(closed.length===1 ? `✅ ${f.completedBy} סגר/ה ${label(f)}: ${f.title}` : `✅ ${closed.length} פריטים נסגרו ע״י הצוות`);
+  if(document.hidden) bumpTitleBadge(closed.length);
+  if(!browserNotifActive()) return;
+  closed.slice(0,3).forEach(it=>{
+    try{
+      const n = new window.Notification(`✅ ${it.completedBy} סגר/ה ${label(it)}`, { body: it.title, tag: 'hub-done-'+it.id, lang:'he', dir:'rtl' });
+      n.onclick = ()=>{ try{ window.focus(); }catch(e){} try{ n.close(); }catch(e){} };
+    }catch(e){ console.error('notification failed', e); }
+  });
+}
 function noteTeamNewItems(){
   if(state.currentUserRole!=='manager') return;
   const rows = (state.items||[]).filter(it=> TEAM_NEW_TYPES.includes(it.type));
+  noteTeamDoneItems();
   if(!teamNewSeenIds){ teamNewSeenIds = new Set(rows.map(i=>i.id)); return; }
   const me = state.currentUser || '';
   const fresh = rows.filter(it=> !teamNewSeenIds.has(it.id));
